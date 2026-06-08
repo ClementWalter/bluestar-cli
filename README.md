@@ -1,80 +1,82 @@
 # Blue Star Ferries cabin watcher
 
-Polls Blue Star Ferries for **cabin availability** on a fully-booked sailing and
-alerts the moment a cabin frees up (e.g. someone cancels).
+Checks and watches **cabin availability** on any Blue Star Ferries route/date, and
+alerts the moment a cabin frees up (e.g. someone cancels) on a sold-out sailing.
 
-Default search baked in: **Piraeus → Patmos 8 Aug 2026, return Patmos → Piraeus
-28 Aug 2026, 1 passenger**. Currently every cabin on both legs is sold out.
+Route, dates, and passengers are all command-line flags — nothing is hard-coded.
+
+## Setup (one-time)
+
+```bash
+uv run --with playwright playwright install chromium
+```
 
 ## Usage
 
 ```bash
-./bluestar_cabins.py check                 # one-shot availability snapshot
-./bluestar_cabins.py poll --interval 120   # loop; rings terminal bell on a free cabin
-./bluestar_cabins.py poll --interval 300 > watch.log 2>&1 &   # background watcher
-./bluestar_cabins.py refresh               # how to capture a fresh token
+# One-shot snapshot
+./bluestar_cabins.py check --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
+
+# One-way, different route
+./bluestar_cabins.py check --from Piraeus --to Naxos --depart 2026-07-12
+
+# Watch: poll every 5 min, ring the terminal bell when a cabin appears
+./bluestar_cabins.py poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 --interval 300
+
+# Background watcher to a log file
+./bluestar_cabins.py poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 \
+    --interval 300 > ~/bluestar.log 2>&1 &
 ```
 
-`uv` runs it with deps auto-installed (PEP 723 inline metadata) — no setup.
+Flags: `--from`, `--to` (port names), `--depart`, `--return` (YYYY-MM-DD; omit
+`--return` for one-way), `--adults` (default 1), `--headful` (show the browser
+while minting, for debugging), plus `--interval` / `--max-polls` on `poll`.
 
-### Other routes / dates
+`uv` runs it with deps auto-installed (PEP 723 inline metadata).
 
-The search is encoded inside a server-**signed** `state` token, so you can't
-change route/dates with a flag — you capture a new token for the new search:
+## How it works
 
-1. Search the route/dates/pax on the site and click **SEARCH**.
-2. From the results URL `…/en-gb/booking?br=XXXX`, copy the value after `br=` → `--state`.
-3. In that page's source find `reservationEndpoint: "/en-gb/reservationapi/{0}/YYYY"` → `--api-id`.
-4. `./bluestar_cabins.py check --state XXXX --api-id YYYY`
-
-To watch a different default permanently, also edit `DEFAULT_*` in
-`bluestar_cabins.py` and its `DEFAULT_TIMETABLES`.
-
-## How it works (reverse-engineered API)
-
-The booking site is a SPA over an undocumented JSON booking engine. All calls go to:
+The site is a Vue SPA over an undocumented JSON booking engine. Cabin
+availability lives in the `GetItineraries` response:
 
 ```
-POST https://www.bluestarferries.com/en-gb/reservationapi/{Method}/{api_id}
+POST https://www.bluestarferries.com/en-gb/reservationapi/GetItineraries/{api_id}
 Headers: X-Requested-With: XMLHttpRequest
          Content-Type: application/x-www-form-urlencoded   # body is still JSON
 Body:    {"state": "<br token>", "timetables": [
-           {"departurePort":"GR:PIR","arrivalPort":"GR:PMS","departureDate":"2026-08-08"},
-           {"departurePort":"GR:PMS","arrivalPort":"GR:PIR","departureDate":"2026-08-28"}]}
-```
+           {"departurePort":"GR:PIR","arrivalPort":"GR:PMS","departureDate":"2026-08-08"}, ...]}
 
-Relevant methods: `GetItineraries` (sailings **+ cabin availability**, the one we
-poll), `GetRouteFrequency` (which days sail), `GetRouteBestPrices`.
-
-`GetItineraries` returns, per sailing, the cabin inventory we care about:
-
-```jsonc
 data[].trips[].availabilitySummary.cabinsAccommodation[] = {
   "description": "2 bed cabin",
-  "count": 0,            // units left — 0 = sold out, >0 = bookable
-  "status": 0,           // 0 sold out · 1 available · 2 limited
-  "price": "&euro;114.50",
-  "isBerth": true, "isExternal": false, ...
+  "count": 0,        // units left — 0 = sold out, >0 = bookable  ← the signal we watch
+  "status": 0,       // 0 sold out · 1 available · 2 limited
+  "price": "&euro;114.50", ...
 }
 ```
 
-A sold-out route has every `count == 0`; a cancellation flips one to `count > 0`,
-which is exactly what `poll` watches for.
+### Why a headless browser is involved
 
-### Auth model
+`api_id` is rendered per page-load and `state`/`br` is base64 of
+`apiId|pax|veh|pets|isReturn|leg…` **prefixed with a signature computed
+client-side and bound to the exact route/dates** (corrupting the signature or
+changing the payload returns empty data). The signing routine lives in the
+minified Vue bundle and cannot be reproduced offline, so:
 
-- `api_id` (e.g. `8DEC4F36C5F91C0`) is rendered into the page HTML
-  (`reservationEndpoint`) and identifies the booking session.
-- `state` / `br` is base64 of `apiId|pax|vehicles|pets|isReturn|leg…` **prefixed
-  with a ~21-byte signature** computed client-side. The signature is validated
-  server-side (corrupting it returns empty data), so the token cannot be forged
-  offline and must be captured from a real search.
-- **No cookies required** — the signed token alone authenticates the request.
-- A stale token makes the endpoint reply with HTML or empty `data`; the tool
-  detects this and tells you to re-capture (`refresh`).
+1. `bluestar_mint.py` reproduces the search in a **headless browser** to mint a
+   valid `(state, api_id)` for the requested trip.
+2. The token is **cached** under `~/.cache/bluestar/` (keyed by the search).
+3. `bluestar_cabins.py` then polls `GetItineraries` over **plain HTTP** (no
+   cookies needed); on expiry it transparently re-mints.
+
+## Files
+
+- `bluestar_cabins.py` — CLI (`check` / `poll`), HTTP polling, parsing, caching.
+- `bluestar_mint.py` — headless-browser token minter (Playwright).
+- `test_bluestar_cabins.py` — unit tests.
 
 ## Tests
 
 ```bash
-uv run --with pytest --with responses --with requests --with click pytest test_bluestar_cabins.py -q
+uv run --with pytest --with responses --with requests --with click --with playwright \
+    pytest test_bluestar_cabins.py -q
 ```

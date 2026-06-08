@@ -1,29 +1,38 @@
 #!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["requests", "click"]
+# dependencies = ["requests", "click", "playwright"]
 # ///
-"""Poll Blue Star Ferries cabin availability and alert when cabins free up.
+"""Check / watch Blue Star Ferries cabin availability for any route and dates.
 
 Blue Star's booking engine exposes an undocumented JSON endpoint,
-``POST /en-gb/reservationapi/GetItineraries/{api_id}``, that returns, per
-sailing, an ``availabilitySummary.cabinsAccommodation`` list. Each entry carries
-a ``count`` (units left) and a ``status`` (0 sold out, 1 available, 2 limited).
-When a route is fully booked every cabin reports ``count == 0``; a cancellation
-flips one to ``count > 0``. This tool replays that request on an interval so a
-freed cabin can be caught the moment it reappears.
+``POST /en-gb/reservationapi/GetItineraries/{api_id}``, that returns, per sailing,
+an ``availabilitySummary.cabinsAccommodation`` list. Each entry carries a
+``count`` (units left) and ``status`` (0 sold out, 1 available, 2 limited). When a
+route is fully booked every ``count`` is 0; a cancellation flips one to ``> 0``,
+which is what this tool watches for.
 
-The request is authenticated by a signed, opaque ``state`` token (the ``br``
-query-string value the website puts on the /booking URL) plus the matching
-``api_id`` rendered into the booking page. Both are produced by performing a
-search on the site; the signature is computed client-side and cannot be forged,
-so the token must be captured from a real search (see ``--help`` of ``refresh``).
-Cookies are not required — the token alone authenticates the call.
+The request is authenticated by a server-signed ``state`` token (the ``br`` value
+on the /booking URL) plus the page-rendered ``api_id``. The signature is computed
+client-side and bound to the exact route/dates/pax, so it cannot be forged
+offline. We therefore mint a token by reproducing the search in a headless
+browser (``bluestar_mint``), cache it, and then poll the endpoint over plain HTTP
+(no cookies needed). On expiry we transparently re-mint.
+
+First-time setup: ``uv run --with playwright playwright install chromium``.
+
+Examples:
+    ./bluestar_cabins.py check  --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
+    ./bluestar_cabins.py poll   --from Piraeus --to Naxos  --depart 2026-07-12 --interval 300
+    ./bluestar_cabins.py check  --from Piraeus --to Patmos --depart 2026-08-08 --adults 2 --headful
 """
 
+import hashlib
+import json
 import logging
 import sys
 import time
+from pathlib import Path
 
 import click
 import requests
@@ -34,24 +43,9 @@ logging.basicConfig(
 logger = logging.getLogger("bluestar")
 
 BASE_URL = "https://www.bluestarferries.com"
-# Endpoint path is templated with the page-specific api_id; method name is fixed.
 ITINERARIES_PATH = "/en-gb/reservationapi/GetItineraries/{api_id}"
 
-# A signed search captured from the live site for Piraeus -> Patmos, 8 Aug ->
-# 28 Aug 2026, 1 passenger. The token embeds the route/dates/pax, so it is only
-# valid for exactly this search. Override with --state/--api-id (or `refresh`)
-# for other searches or once this token expires server-side.
-DEFAULT_API_ID = "8DEC4F36C5F91C0"
-DEFAULT_STATE = (
-    "Uu9qDaTowUpgPuw4_jFOXrjs6sZBOERFQzRGMzZDNUY5MUMwfDF8MHwwfFRydWV8"
-    "R1I6UElSfEdSOlBNU3wyMDI2MDgwOHxHUjpQTVN8R1I6UElSfDIwMjYwODI4"
-)
-DEFAULT_TIMETABLES = [
-    ("GR:PIR", "GR:PMS", "2026-08-08"),
-    ("GR:PMS", "GR:PIR", "2026-08-28"),
-]
-
-# The booking engine rejects the call unless it looks like the site's own XHR:
+# The booking engine only answers when the request mimics the site's own XHR:
 # it reads the JSON body but insists on the form-urlencoded content type.
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -64,20 +58,22 @@ HEADERS = {
     "Origin": BASE_URL,
 }
 
-# availabilitySummary.cabinsAccommodation[].status values.
 STATUS = {0: "SOLD OUT", 1: "AVAILABLE", 2: "LIMITED"}
+CACHE_DIR = Path.home() / ".cache" / "bluestar"
 
 
 class TokenExpired(RuntimeError):
     """Raised when the booking engine no longer recognises the state token."""
 
 
-def fetch_itineraries(state: str, api_id: str, timetables: list[tuple[str, str, str]]) -> dict:
-    """Call GetItineraries and return the parsed JSON, or raise TokenExpired.
+# --- HTTP polling -----------------------------------------------------------
 
-    The endpoint answers 200 with HTML (not JSON) when the token/api_id is stale,
-    and 200 with an empty ``data`` list when the signature does not validate; both
-    mean the caller needs a fresh token rather than a transient retry.
+
+def fetch_itineraries(state: str, api_id: str, timetables: list) -> dict:
+    """Call GetItineraries and return parsed JSON, or raise TokenExpired.
+
+    A stale token/api_id makes the endpoint answer 200 with HTML, and a rejected
+    signature answers 200 JSON with empty ``data``; both mean re-mint, not retry.
     """
     url = BASE_URL + ITINERARIES_PATH.format(api_id=api_id)
     payload = {
@@ -154,97 +150,104 @@ def render(data: dict) -> str:
     return "\n".join(lines)
 
 
-# --- Shared options ---------------------------------------------------------
+# --- Token acquisition (mint + cache) ---------------------------------------
 
 
-def _state_options(func):
-    func = click.option("--state", default=DEFAULT_STATE, help="Signed 'br' token from a search.")(
-        func
-    )
-    func = click.option("--api-id", default=DEFAULT_API_ID, help="Page api_id matching the token.")(
-        func
-    )
+def _cache_key(frm, to, depart, ret, adults) -> Path:
+    raw = f"{frm}|{to}|{depart}|{ret}|{adults}".lower()
+    return CACHE_DIR / (hashlib.sha1(raw.encode()).hexdigest()[:16] + ".json")
+
+
+def get_token(frm, to, depart, ret, adults, headless=True, force=False) -> dict:
+    """Return a usable token dict, minting via headless browser if needed.
+
+    Cached on disk per search so repeated polls reuse one browser-minted token.
+    """
+    cache = _cache_key(frm, to, depart, ret, adults)
+    if cache.exists() and not force:
+        return json.loads(cache.read_text())
+    logger.info("Minting a booking token via headless browser (one-time per search)...")
+    import bluestar_mint  # imported lazily so HTTP-only reuse needs no browser
+
+    tok = bluestar_mint.mint_token(frm, to, depart, ret, adults, headless=headless)
+    record = {"state": tok.state, "api_id": tok.api_id, "timetables": tok.timetables}
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(record))
+    logger.info("Token minted (api_id=%s) and cached.", tok.api_id)
+    return record
+
+
+def fetch_with_refresh(frm, to, depart, ret, adults, headless) -> dict:
+    """Fetch itineraries, re-minting the token once if it has expired."""
+    tok = get_token(frm, to, depart, ret, adults, headless=headless)
+    try:
+        return fetch_itineraries(tok["state"], tok["api_id"], tok["timetables"])
+    except TokenExpired:
+        logger.warning("Cached token rejected; re-minting...")
+        tok = get_token(frm, to, depart, ret, adults, headless=headless, force=True)
+        return fetch_itineraries(tok["state"], tok["api_id"], tok["timetables"])
+
+
+# --- CLI --------------------------------------------------------------------
+
+
+def _trip_options(func):
+    func = click.option("--from", "frm", required=True, help="Departure port name, e.g. Piraeus.")(func)
+    func = click.option("--to", required=True, help="Arrival port name, e.g. Patmos.")(func)
+    func = click.option("--depart", required=True, help="Departure date YYYY-MM-DD.")(func)
+    func = click.option("--return", "ret", default=None, help="Return date YYYY-MM-DD (omit for one-way).")(func)
+    func = click.option("--adults", default=1, help="Number of passengers.")(func)
+    func = click.option("--headful", is_flag=True, help="Show the browser while minting (debug).")(func)
     return func
 
 
 @click.group()
 def cli():
-    """Check / poll Blue Star Ferries cabin availability."""
+    """Check / watch Blue Star Ferries cabin availability for any route."""
 
 
 @cli.command()
-@_state_options
-def check(state: str, api_id: str):
-    """One-shot: print current cabin availability for the configured search."""
+@_trip_options
+def check(frm, to, depart, ret, adults, headful):
+    """One-shot: print current cabin availability for the given trip."""
     try:
-        data = fetch_itineraries(state, api_id, DEFAULT_TIMETABLES)
-    except TokenExpired as exc:
-        logger.error("Token rejected: %s", exc)
-        logger.error("Capture a fresh token: run `bluestar_cabins.py refresh` for instructions.")
+        data = fetch_with_refresh(frm, to, depart, ret, adults, headless=not headful)
+    except Exception as exc:
+        logger.error("Could not check availability: %s", exc)
         sys.exit(2)
     avail = available_offers(data)
     logger.info("Cabin availability:%s", render(data))
-    if avail:
-        logger.info("\U0001f389 %d bookable cabin offer(s) found!", len(avail))
-    else:
-        logger.info("No cabins available yet.")
+    logger.info("\U0001f389 %d bookable cabin offer(s)!" % len(avail) if avail else "No cabins available yet.")
 
 
 @cli.command()
-@_state_options
+@_trip_options
 @click.option("--interval", default=120, help="Seconds between polls.")
 @click.option("--max-polls", default=0, help="Stop after N polls (0 = forever).")
-def poll(state: str, api_id: str, interval: int, max_polls: int):
+def poll(frm, to, depart, ret, adults, headful, interval, max_polls):
     """Loop: poll on an interval and ring the terminal bell when a cabin frees up."""
-    logger.info("Polling every %ds (Ctrl-C to stop)...", interval)
+    logger.info("Watching %s->%s %s%s every %ds (Ctrl-C to stop)...",
+                frm, to, depart, f"/{ret}" if ret else "", interval)
     n = 0
     while True:
         n += 1
         try:
-            data = fetch_itineraries(state, api_id, DEFAULT_TIMETABLES)
+            data = fetch_with_refresh(frm, to, depart, ret, adults, headless=not headful)
             avail = available_offers(data)
             if avail:
-                # \a rings the terminal bell so an idle user gets a real alert.
-                click.echo("\a", nl=False)
+                click.echo("\a", nl=False)  # terminal bell to alert an idle user
                 logger.info("\U0001f389 CABIN(S) AVAILABLE!%s", render(data))
                 for o in avail:
-                    logger.info(
-                        "  -> %s %s x%d %s on %s",
-                        o["route"], o["description"], o["count"], o["price"], o["date"],
-                    )
+                    logger.info("  -> %s %s x%d %s on %s",
+                                o["route"], o["description"], o["count"], o["price"], o["date"])
             else:
                 logger.info("poll #%d: still sold out", n)
-        except TokenExpired as exc:
-            logger.error("poll #%d: token rejected (%s) - need a fresh --state/--api-id", n, exc)
-        except requests.RequestException as exc:
-            logger.warning("poll #%d: network error: %s", n, exc)
+        except Exception as exc:
+            logger.warning("poll #%d failed: %s", n, exc)
         if max_polls and n >= max_polls:
             logger.info("Reached max-polls=%d, stopping.", max_polls)
             return
         time.sleep(interval)
-
-
-@cli.command()
-def refresh():
-    """Print instructions for capturing a fresh state token + api_id."""
-    click.echo(
-        """\
-The `state` token is a server-signed value; it cannot be generated offline.
-To capture a fresh one for any search:
-
-  1. Open https://www.bluestarferries.com/en-gb in a browser.
-  2. Search your route/dates/passengers and click SEARCH.
-  3. On the results URL  .../en-gb/booking?br=XXXX  copy the value after `br=`.
-     That is your --state token.
-  4. View source on that page and find:
-        reservationEndpoint: "/en-gb/reservationapi/{0}/YYYY"
-     The YYYY is your --api-id.
-  5. Run:  ./bluestar_cabins.py check --state XXXX --api-id YYYY
-
-The token encodes the exact route/dates/pax, so a new search is needed to change
-any of them. Tokens stay valid until the booking session expires server-side.
-"""
-    )
 
 
 if __name__ == "__main__":
