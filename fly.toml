@@ -3,7 +3,7 @@
 # so the machine stays up. Deploy with `fly deploy`; set NTFY_URL via secrets.
 #
 # `app` must be globally unique on Fly — change it if `fly launch` reports a clash.
-app = "bluestar-cabin-watch"
+app = "aged-grass-1958"
 primary_region = "cdg"
 
 [build]
