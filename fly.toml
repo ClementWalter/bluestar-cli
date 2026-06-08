@@ -17,6 +17,7 @@ primary_region = "cdg"
   BSF_RETURN = "2026-08-28"
   BSF_ADULTS = "1"
   BSF_INTERVAL = "600"
+  BSF_HEARTBEAT_HOURS = "24"
 
 # 1 GB gives Chromium headroom while it mints a token; the rest of the time the
 # loop is idle HTTP. One machine, no autostop (it has no service to wake it).

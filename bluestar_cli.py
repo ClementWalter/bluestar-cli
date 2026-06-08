@@ -361,14 +361,30 @@ def fetch_with_refresh(frm, to, depart, ret, adults, headless) -> dict:
 # ===========================================================================
 
 
+def status_line(data: dict) -> str:
+    """One-line availability summary for heartbeat pings."""
+    avail = available_offers(data)
+    if not avail:
+        return "all cabins sold out"
+    return f"{len(avail)} bookable cabin offer(s): " + ", ".join(
+        f"{o['description']} x{o['count']} ({o['date']})" for o in avail
+    )
+
+
 def send_ntfy(target: str, title: str, message: str, priority: str = "high", tags: str = "ship"):
-    """Publish a notification to an ntfy topic (bare name or full URL)."""
+    """Publish a notification to an ntfy topic (bare name or full URL).
+
+    HTTP headers are latin-1 only, so emoji belong in ``message`` (UTF-8 body) or
+    in ``tags`` (ntfy renders tag names as emoji) — never in the Title header. The
+    title is sanitised so a stray non-latin-1 char can't break delivery.
+    """
     url = target if target.startswith("http") else f"https://ntfy.sh/{target}"
+    safe_title = title.encode("latin-1", "ignore").decode("latin-1")
     requests.post(
         url,
         data=message.encode("utf-8"),
         headers={
-            "Title": title,
+            "Title": safe_title,
             "Priority": priority,
             "Tags": tags,
             "Click": HOMEPAGE,
@@ -417,7 +433,9 @@ def check(frm, to, depart, ret, adults, headful):
 @click.option("--max-polls", default=0, help="Stop after N polls (0 = forever).")
 @click.option("--notify-ntfy", envvar="NTFY_URL", default=None,
               help="ntfy topic name or full URL to push to when a cabin frees up.")
-def poll(frm, to, depart, ret, adults, headful, interval, max_polls, notify_ntfy):
+@click.option("--heartbeat-hours", default=24.0, envvar="BSF_HEARTBEAT_HOURS",
+              help="Send a low-priority 'still alive' ntfy this often (0 = off).")
+def poll(frm, to, depart, ret, adults, headful, interval, max_polls, notify_ntfy, heartbeat_hours):
     """Loop: poll on an interval, alert (bell + optional ntfy push) when a cabin frees up."""
     trip = f"{frm}->{to} {depart}" + (f"/{ret}" if ret else "")
     logger.info("Watching %s every %ds (Ctrl-C to stop)...", trip, interval)
@@ -431,11 +449,25 @@ def poll(frm, to, depart, ret, adults, headful, interval, max_polls, notify_ntfy
         except Exception as exc:
             logger.warning("ntfy startup ping failed: %s", exc)
     n, last_sig = 0, None
+    last_heartbeat = time.monotonic()  # startup ping already covers t=0
     while True:
         n += 1
         try:
             data = fetch_with_refresh(frm, to, depart, ret, adults, headless=not headful)
             avail = available_offers(data)
+            # Daily heartbeat: a low-priority "still alive" ping so no news reads as
+            # "watcher healthy", not "watcher silently died".
+            if notify_ntfy and heartbeat_hours and (
+                time.monotonic() - last_heartbeat >= heartbeat_hours * 3600
+            ):
+                try:
+                    send_ntfy(notify_ntfy, f"Watcher alive: {trip}",
+                              f"{status_line(data)} (checked {n} times).",
+                              priority="min", tags="zzz")
+                    logger.info("Sent ntfy heartbeat.")
+                except Exception as exc:
+                    logger.warning("ntfy heartbeat failed: %s", exc)
+                last_heartbeat = time.monotonic()
             if avail:
                 click.echo("\a", nl=False)  # terminal bell to alert an idle user
                 logger.info("\U0001f389 CABIN(S) AVAILABLE!%s", render(data))
@@ -448,7 +480,7 @@ def poll(frm, to, depart, ret, adults, headful, interval, max_polls, notify_ntfy
                         for o in avail
                     )
                     try:
-                        send_ntfy(notify_ntfy, f"🎉 Cabin available: {trip}", body)
+                        send_ntfy(notify_ntfy, f"Cabin available: {trip}", body, tags="tada,ship")
                         logger.info("Sent ntfy alert.")
                     except Exception as exc:
                         logger.warning("ntfy alert failed: %s", exc)

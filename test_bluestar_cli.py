@@ -152,6 +152,14 @@ def test_offers_signature_changes_with_count(available_leg):
     assert bsc._offers_signature(offers) != bsc._offers_signature(bumped)
 
 
+def test_status_line_sold_out(sold_out_leg):
+    assert bsc.status_line({"data": [sold_out_leg]}) == "all cabins sold out"
+
+
+def test_status_line_reports_available(available_leg):
+    assert bsc.status_line({"data": [available_leg]}).startswith("1 bookable cabin offer(s)")
+
+
 @responses.activate
 def test_send_ntfy_posts_to_bare_topic():
     responses.add(responses.POST, "https://ntfy.sh/my-topic", status=200)
