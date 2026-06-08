@@ -1,0 +1,25 @@
+# Fly.io config for the always-on cabin watcher.
+# This is a worker (no inbound HTTP service): the container runs `poll` forever,
+# so the machine stays up. Deploy with `fly deploy`; set NTFY_URL via secrets.
+#
+# `app` must be globally unique on Fly — change it if `fly launch` reports a clash.
+app = "bluestar-cabin-watch"
+primary_region = "cdg"
+
+[build]
+
+# Trip + cadence. Edit these (or override with `fly secrets`) to watch a different
+# route/dates. NTFY_URL is set separately as a secret (see README).
+[env]
+  BSF_FROM = "Piraeus"
+  BSF_TO = "Patmos"
+  BSF_DEPART = "2026-08-08"
+  BSF_RETURN = "2026-08-28"
+  BSF_ADULTS = "1"
+  BSF_INTERVAL = "600"
+
+# 1 GB gives Chromium headroom while it mints a token; the rest of the time the
+# loop is idle HTTP. One machine, no autostop (it has no service to wake it).
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024"

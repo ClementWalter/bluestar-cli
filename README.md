@@ -68,10 +68,38 @@ minified Vue bundle and cannot be reproduced offline, so:
 3. It then polls `GetItineraries` over **plain HTTP** (no cookies needed); on
    expiry it transparently re-mints.
 
+## Notifications (ntfy)
+
+`poll --notify-ntfy <topic-or-url>` (or env `NTFY_URL`) pushes to an
+[ntfy.sh](https://ntfy.sh) topic when a cabin frees up. Subscribe to the same
+topic in the ntfy phone app (or open `https://ntfy.sh/<topic>` in a browser) to
+receive it. A low-priority startup ping is sent so you can confirm the channel.
+It notifies on first appearance and whenever the available set changes — not
+every interval.
+
+## Deploy as an always-on watcher (Fly.io)
+
+Runs `poll` 24/7 in a tiny container that mints tokens headlessly and pushes to
+ntfy. Trip params live in `fly.toml` (`[env]`); the ntfy target is a secret.
+
+```bash
+fly auth login
+fly launch --no-deploy --copy-config          # creates the app from fly.toml (rename if the name clashes)
+fly secrets set NTFY_URL=<your-ntfy-topic>     # e.g. bluestar-cabins-xxxx
+fly deploy
+fly logs                                       # watch it run
+```
+
+To change the watched trip later: edit `[env]` in `fly.toml` and `fly deploy`
+(or `fly secrets set BSF_DEPART=... BSF_RETURN=...`). It's a worker with no
+inbound HTTP service, sized at 1 GB so Chromium has headroom while minting.
+
 ## Files
 
 - `bluestar_cli.py` — single entrypoint: CLI (`check` / `poll`), HTTP polling,
-  parsing, caching, and the Playwright token minter. All deps in the PEP 723 header.
+  parsing, caching, ntfy notify, and the Playwright token minter. All deps in the
+  PEP 723 header.
+- `Dockerfile`, `fly.toml`, `.dockerignore` — always-on deployment.
 - `test_bluestar_cli.py` — unit tests.
 
 ## Tests

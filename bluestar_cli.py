@@ -361,12 +361,33 @@ def fetch_with_refresh(frm, to, depart, ret, adults, headless) -> dict:
 # ===========================================================================
 
 
+def send_ntfy(target: str, title: str, message: str, priority: str = "high", tags: str = "ship"):
+    """Publish a notification to an ntfy topic (bare name or full URL)."""
+    url = target if target.startswith("http") else f"https://ntfy.sh/{target}"
+    requests.post(
+        url,
+        data=message.encode("utf-8"),
+        headers={
+            "Title": title,
+            "Priority": priority,
+            "Tags": tags,
+            "Click": HOMEPAGE,
+        },
+        timeout=15,
+    )
+
+
+def _offers_signature(offers: list[dict]) -> tuple:
+    """Stable identity of an availability set, to notify only when it changes."""
+    return tuple(sorted((o["route"], o["date"], o["description"], o["sailing"], o["count"]) for o in offers))
+
+
 def _trip_options(func):
-    func = click.option("--from", "frm", required=True, help="Departure port name, e.g. Piraeus.")(func)
-    func = click.option("--to", required=True, help="Arrival port name, e.g. Patmos.")(func)
-    func = click.option("--depart", required=True, help="Departure date YYYY-MM-DD.")(func)
-    func = click.option("--return", "ret", default=None, help="Return date YYYY-MM-DD (omit for one-way).")(func)
-    func = click.option("--adults", default=1, help="Number of passengers.")(func)
+    func = click.option("--from", "frm", required=True, envvar="BSF_FROM", help="Departure port name, e.g. Piraeus.")(func)
+    func = click.option("--to", required=True, envvar="BSF_TO", help="Arrival port name, e.g. Patmos.")(func)
+    func = click.option("--depart", required=True, envvar="BSF_DEPART", help="Departure date YYYY-MM-DD.")(func)
+    func = click.option("--return", "ret", default=None, envvar="BSF_RETURN", help="Return date YYYY-MM-DD (omit for one-way).")(func)
+    func = click.option("--adults", default=1, envvar="BSF_ADULTS", help="Number of passengers.")(func)
     func = click.option("--headful", is_flag=True, help="Show the browser while minting (debug).")(func)
     return func
 
@@ -392,13 +413,24 @@ def check(frm, to, depart, ret, adults, headful):
 
 @cli.command()
 @_trip_options
-@click.option("--interval", default=120, help="Seconds between polls.")
+@click.option("--interval", default=120, envvar="BSF_INTERVAL", help="Seconds between polls.")
 @click.option("--max-polls", default=0, help="Stop after N polls (0 = forever).")
-def poll(frm, to, depart, ret, adults, headful, interval, max_polls):
-    """Loop: poll on an interval and ring the terminal bell when a cabin frees up."""
-    logger.info("Watching %s->%s %s%s every %ds (Ctrl-C to stop)...",
-                frm, to, depart, f"/{ret}" if ret else "", interval)
-    n = 0
+@click.option("--notify-ntfy", envvar="NTFY_URL", default=None,
+              help="ntfy topic name or full URL to push to when a cabin frees up.")
+def poll(frm, to, depart, ret, adults, headful, interval, max_polls, notify_ntfy):
+    """Loop: poll on an interval, alert (bell + optional ntfy push) when a cabin frees up."""
+    trip = f"{frm}->{to} {depart}" + (f"/{ret}" if ret else "")
+    logger.info("Watching %s every %ds (Ctrl-C to stop)...", trip, interval)
+    if notify_ntfy:
+        # A startup ping confirms the notification channel is wired up correctly.
+        try:
+            send_ntfy(notify_ntfy, f"Bluestar watcher started: {trip}",
+                      "Watching for cabin availability. You'll get a push when one frees up.",
+                      priority="low", tags="eyes")
+            logger.info("Sent ntfy startup ping.")
+        except Exception as exc:
+            logger.warning("ntfy startup ping failed: %s", exc)
+    n, last_sig = 0, None
     while True:
         n += 1
         try:
@@ -407,10 +439,22 @@ def poll(frm, to, depart, ret, adults, headful, interval, max_polls):
             if avail:
                 click.echo("\a", nl=False)  # terminal bell to alert an idle user
                 logger.info("\U0001f389 CABIN(S) AVAILABLE!%s", render(data))
-                for o in avail:
-                    logger.info("  -> %s %s x%d %s on %s",
-                                o["route"], o["description"], o["count"], o["price"], o["date"])
+                sig = _offers_signature(avail)
+                # Notify on first appearance and whenever the available set changes,
+                # not every interval (avoids spamming once a cabin is up).
+                if notify_ntfy and sig != last_sig:
+                    body = "\n".join(
+                        f"{o['description']} x{o['count']} {o['price']} — {o['route']} {o['date']}"
+                        for o in avail
+                    )
+                    try:
+                        send_ntfy(notify_ntfy, f"🎉 Cabin available: {trip}", body)
+                        logger.info("Sent ntfy alert.")
+                    except Exception as exc:
+                        logger.warning("ntfy alert failed: %s", exc)
+                last_sig = sig
             else:
+                last_sig = None  # reset so a later reappearance re-notifies
                 logger.info("poll #%d: still sold out", n)
         except Exception as exc:
             logger.warning("poll #%d failed: %s", n, exc)

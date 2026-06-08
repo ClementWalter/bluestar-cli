@@ -141,6 +141,31 @@ def test_cache_key_differs_for_different_search():
     assert a != b
 
 
+def test_offers_signature_ignores_order(available_leg):
+    offers = bsc.available_offers({"data": [available_leg]})
+    assert bsc._offers_signature(offers) == bsc._offers_signature(list(reversed(offers)))
+
+
+def test_offers_signature_changes_with_count(available_leg):
+    offers = bsc.available_offers({"data": [available_leg]})
+    bumped = [{**offers[0], "count": offers[0]["count"] + 1}]
+    assert bsc._offers_signature(offers) != bsc._offers_signature(bumped)
+
+
+@responses.activate
+def test_send_ntfy_posts_to_bare_topic():
+    responses.add(responses.POST, "https://ntfy.sh/my-topic", status=200)
+    bsc.send_ntfy("my-topic", "title", "body")
+    assert responses.calls[0].request.headers["Title"] == "title"
+
+
+@responses.activate
+def test_send_ntfy_accepts_full_url():
+    responses.add(responses.POST, "https://ntfy.example.com/t", status=200)
+    bsc.send_ntfy("https://ntfy.example.com/t", "title", "body")
+    assert responses.calls[0].request.url == "https://ntfy.example.com/t"
+
+
 def test_decode_timetables_recovers_round_trip_legs():
     # base64( <2 sig bytes> + "APIID|1|0|0|True|GR:PIR|GR:PMS|20260808|GR:PMS|GR:PIR|20260828" )
     import base64

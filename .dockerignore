@@ -1,0 +1,8 @@
+.git
+__pycache__
+*.pyc
+mint_failure.png
+test_bluestar_cli.py
+README.md
+SKILL.md
+fly.toml
