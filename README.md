@@ -15,16 +15,16 @@ uv run --with playwright playwright install chromium
 
 ```bash
 # One-shot snapshot
-./bluestar_cabins.py check --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
+./bluestar_cli.py check --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
 
 # One-way, different route
-./bluestar_cabins.py check --from Piraeus --to Naxos --depart 2026-07-12
+./bluestar_cli.py check --from Piraeus --to Naxos --depart 2026-07-12
 
 # Watch: poll every 5 min, ring the terminal bell when a cabin appears
-./bluestar_cabins.py poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 --interval 300
+./bluestar_cli.py poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 --interval 300
 
 # Background watcher to a log file
-./bluestar_cabins.py poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 \
+./bluestar_cli.py poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 \
     --interval 300 > ~/bluestar.log 2>&1 &
 ```
 
@@ -62,21 +62,21 @@ client-side and bound to the exact route/dates** (corrupting the signature or
 changing the payload returns empty data). The signing routine lives in the
 minified Vue bundle and cannot be reproduced offline, so:
 
-1. `bluestar_mint.py` reproduces the search in a **headless browser** to mint a
-   valid `(state, api_id)` for the requested trip.
+1. The tool reproduces the search in a **headless browser** (Playwright) to mint
+   a valid `(state, api_id)` for the requested trip.
 2. The token is **cached** under `~/.cache/bluestar/` (keyed by the search).
-3. `bluestar_cabins.py` then polls `GetItineraries` over **plain HTTP** (no
-   cookies needed); on expiry it transparently re-mints.
+3. It then polls `GetItineraries` over **plain HTTP** (no cookies needed); on
+   expiry it transparently re-mints.
 
 ## Files
 
-- `bluestar_cabins.py` — CLI (`check` / `poll`), HTTP polling, parsing, caching.
-- `bluestar_mint.py` — headless-browser token minter (Playwright).
-- `test_bluestar_cabins.py` — unit tests.
+- `bluestar_cli.py` — single entrypoint: CLI (`check` / `poll`), HTTP polling,
+  parsing, caching, and the Playwright token minter. All deps in the PEP 723 header.
+- `test_bluestar_cli.py` — unit tests.
 
 ## Tests
 
 ```bash
 uv run --with pytest --with responses --with requests --with click --with playwright \
-    pytest test_bluestar_cabins.py -q
+    pytest test_bluestar_cli.py -q
 ```

@@ -24,8 +24,8 @@ def _load(name):
     return mod
 
 
-bsc = _load("bluestar_cabins")
-mint = _load("bluestar_mint")
+bsc = _load("bluestar_cli")
+mint = bsc  # mint helpers now live in the same consolidated module
 
 TIMETABLES = [("GR:PIR", "GR:PMS", "2026-08-08")]
 
