@@ -153,7 +153,7 @@ def test_offers_signature_changes_with_count(available_leg):
 
 
 def test_status_line_sold_out(sold_out_leg):
-    assert bsc.status_line({"data": [sold_out_leg]}) == "all cabins sold out"
+    assert bsc.status_line({"data": [sold_out_leg]}) == "all cabins sold out; seats n/a"
 
 
 def test_status_line_reports_available(available_leg):
@@ -172,6 +172,64 @@ def test_send_ntfy_accepts_full_url():
     responses.add(responses.POST, "https://ntfy.example.com/t", status=200)
     bsc.send_ntfy("https://ntfy.example.com/t", "title", "body")
     assert responses.calls[0].request.url == "https://ntfy.example.com/t"
+
+
+@pytest.fixture
+def green_seat_leg():
+    """A leg whose seats are sold out for cabins but green for a seat type."""
+    return {
+        "timetable": {"departurePort": "GR:PMS", "arrivalPort": "GR:PIR", "departureDate": "2026-08-28"},
+        "trips": [
+            {
+                "departureDateTime": "2026-08-28 00:15",
+                "vessel": {"name": "Blue Star 2"},
+                "availabilitySummary": {
+                    "cabinsAccommodation": [{"description": "2 bed cabin", "count": 0, "status": 0, "price": "&euro;114.50"}],
+                    "seatsAccommodation": [
+                        {"description": "Economy", "count": 1044, "status": 2, "price": "&euro;56.00"},
+                        {"description": "Airplane Type Seats", "count": 8, "status": 1, "price": "&euro;61.00"},
+                    ],
+                },
+            }
+        ],
+    }
+
+
+SAILING_KEY = ("GR:PMS->GR:PIR", "2026-08-28", "2026-08-28 00:15")
+
+
+def test_seat_status_is_green_when_a_seat_type_is_available(green_seat_leg):
+    assert bsc.seat_status_by_sailing({"data": [green_seat_leg]})[SAILING_KEY] == 0
+
+
+def test_seat_status_is_orange_when_only_limited_seats(green_seat_leg):
+    # Drop the green seat type; only the orange (status 2) Economy remains.
+    green_seat_leg["trips"][0]["availabilitySummary"]["seatsAccommodation"].pop()
+    assert bsc.seat_status_by_sailing({"data": [green_seat_leg]})[SAILING_KEY] == 1
+
+
+def test_seat_status_skips_sailings_without_seats(sold_out_leg):
+    assert bsc.seat_status_by_sailing({"data": [sold_out_leg]}) == {}
+
+
+def test_seat_degradations_flags_green_to_orange():
+    assert bsc.seat_degradations({SAILING_KEY: 0}, {SAILING_KEY: 1}) == [(SAILING_KEY, 0, 1)]
+
+
+def test_seat_degradations_empty_when_unchanged():
+    assert bsc.seat_degradations({SAILING_KEY: 1}, {SAILING_KEY: 1}) == []
+
+
+def test_seat_degradations_ignores_improvement():
+    assert bsc.seat_degradations({SAILING_KEY: 1}, {SAILING_KEY: 0}) == []
+
+
+def test_seat_degradations_ignores_unseen_sailing():
+    assert bsc.seat_degradations({}, {SAILING_KEY: 2}) == []
+
+
+def test_status_line_reports_seat_status(green_seat_leg):
+    assert bsc.status_line({"data": [green_seat_leg]}).endswith("seats available (green)")
 
 
 def test_decode_timetables_recovers_round_trip_legs():

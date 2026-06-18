@@ -65,6 +65,13 @@ HEADERS = {
 }
 
 STATUS = {0: "SOLD OUT", 1: "AVAILABLE", 2: "LIMITED"}
+
+# Seat availability degrades green -> orange -> sold out as a sailing fills. The
+# booking engine encodes this per accommodation as status 1 (green/available),
+# 2 (orange/limited) or 0 (sold out); SEAT_RANK orders those by scarcity (lower
+# is better) so the "greenest" option still on sale can be compared across polls.
+SEAT_RANK = {1: 0, 2: 1, 0: 2}
+SEAT_LABEL = {0: "available (green)", 1: "limited (orange)", 2: "sold out"}  # keyed by rank
 CACHE_DIR = Path.home() / ".cache" / "bluestar"
 MONTHS = [
     "January", "February", "March", "April", "May", "June",
@@ -135,6 +142,40 @@ def available_offers(data: dict) -> list[dict]:
             if offer["count"] > 0:
                 found.append({"route": route, "date": date, **offer})
     return found
+
+
+def seat_status_by_sailing(data: dict) -> dict:
+    """Best (greenest) passenger-seat availability rank per sailing.
+
+    Keyed by ``(route, date, sailing)``; the value is the SEAT_RANK of the most
+    available seat type on offer (0 green, 1 orange, 2 sold out). Passengers
+    without a cabin book from ``seatsAccommodation``, so this collapses those rows
+    to the single status the site would surface for the leg — and lets the poller
+    notice when a leg stops having any green seat.
+    """
+    out = {}
+    for leg in data["data"]:
+        route = f"{leg['timetable']['departurePort']}->{leg['timetable']['arrivalPort']}"
+        date = leg["timetable"]["departureDate"]
+        for trip in leg.get("trips", []):
+            seats = trip.get("availabilitySummary", {}).get("seatsAccommodation", [])
+            if not seats:
+                continue
+            out[(route, date, trip.get("departureDateTime", "?"))] = min(
+                SEAT_RANK.get(s.get("status", 0), 2) for s in seats
+            )
+    return out
+
+
+def seat_degradations(prev: dict, now: dict) -> list[tuple]:
+    """Sailings whose best seat status got worse between two polls.
+
+    Returns ``(key, old_rank, new_rank)`` for each sailing present in both
+    snapshots whose rank increased (green -> orange -> sold out). This is the
+    "buy a passenger ticket before it fills" signal, distinct from the cabin
+    alert: a worsening means the deck/seat fares are running out.
+    """
+    return [(k, prev[k], now[k]) for k in now if k in prev and now[k] > prev[k]]
 
 
 def render(data: dict) -> str:
@@ -362,13 +403,18 @@ def fetch_with_refresh(frm, to, depart, ret, adults, headless) -> dict:
 
 
 def status_line(data: dict) -> str:
-    """One-line availability summary for heartbeat pings."""
+    """One-line availability summary (cabins + seats) for heartbeat pings."""
     avail = available_offers(data)
-    if not avail:
-        return "all cabins sold out"
-    return f"{len(avail)} bookable cabin offer(s): " + ", ".join(
-        f"{o['description']} x{o['count']} ({o['date']})" for o in avail
+    cabins = (
+        f"{len(avail)} bookable cabin offer(s): "
+        + ", ".join(f"{o['description']} x{o['count']} ({o['date']})" for o in avail)
+        if avail
+        else "all cabins sold out"
     )
+    seats = seat_status_by_sailing(data)
+    # Surface the worst (least available) seat rank so a degrading leg shows up.
+    seat_part = f"seats {SEAT_LABEL[max(seats.values())]}" if seats else "seats n/a"
+    return f"{cabins}; {seat_part}"
 
 
 def send_ntfy(target: str, title: str, message: str, priority: str = "high", tags: str = "ship"):
@@ -448,13 +494,34 @@ def poll(frm, to, depart, ret, adults, headful, interval, max_polls, notify_ntfy
             logger.info("Sent ntfy startup ping.")
         except Exception as exc:
             logger.warning("ntfy startup ping failed: %s", exc)
-    n, last_sig = 0, None
+    n, last_sig, last_seat = 0, None, None
     last_heartbeat = time.monotonic()  # startup ping already covers t=0
     while True:
         n += 1
         try:
             data = fetch_with_refresh(frm, to, depart, ret, adults, headless=not headful)
             avail = available_offers(data)
+            # Seat (passenger-without-cabin) watch: alert when the greenest seat
+            # on a sailing degrades (green -> orange -> sold out), so a deck fare
+            # can be bought before the boat fills. Independent of the cabin alert.
+            seat_now = seat_status_by_sailing(data)
+            if notify_ntfy and last_seat is not None:
+                worse = seat_degradations(last_seat, seat_now)
+                if worse:
+                    body = "\n".join(
+                        f"{route} {date} [{sail}]: "
+                        f"{SEAT_LABEL[old]} -> {SEAT_LABEL[new]}"
+                        for (route, date, sail), old, new in worse
+                    )
+                    logger.info("Seat availability degraded:\n%s", body)
+                    try:
+                        send_ntfy(notify_ntfy, f"Seats filling up: {trip}",
+                                  body + "\n\nBuy a passenger ticket before it sells out.",
+                                  tags="warning,ship")
+                        logger.info("Sent ntfy seat-degradation alert.")
+                    except Exception as exc:
+                        logger.warning("ntfy seat alert failed: %s", exc)
+            last_seat = seat_now
             # Daily heartbeat: a low-priority "still alive" ping so no news reads as
             # "watcher healthy", not "watcher silently died".
             if notify_ntfy and heartbeat_hours and (
