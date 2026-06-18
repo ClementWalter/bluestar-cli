@@ -11,10 +11,9 @@ primary_region = "cdg"
 # Trip + cadence. Edit these (or override with `fly secrets`) to watch a different
 # route/dates. NTFY_URL is set separately as a secret (see README).
 [env]
-  BSF_FROM = "Piraeus"
-  BSF_TO = "Patmos"
-  BSF_DEPART = "2026-08-08"
-  BSF_RETURN = "2026-08-28"
+  BSF_FROM = "Patmos"
+  BSF_TO = "Piraeus"
+  BSF_DEPART = "2026-08-28"
   BSF_ADULTS = "1"
   BSF_INTERVAL = "600"
   BSF_HEARTBEAT_HOURS = "24"
