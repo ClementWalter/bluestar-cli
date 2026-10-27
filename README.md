@@ -1,5 +1,8 @@
-# Blue Star Ferries cabin watcher
+# bluestar-cli
 
+**Visibility: public.**
+
+Blue Star Ferries cabin watcher.
 Checks and watches **cabin availability** on any Blue Star Ferries route/date, and
 alerts the moment a cabin frees up (e.g. someone cancels) on a sold-out sailing.
 
@@ -15,18 +18,21 @@ uv run --with playwright playwright install chromium
 
 ```bash
 # One-shot snapshot
-./bluestar_cli.py check --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
+bluestar check --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
 
 # One-way, different route
-./bluestar_cli.py check --from Piraeus --to Naxos --depart 2026-07-12
+bluestar check --from Piraeus --to Naxos --depart 2026-07-12
 
 # Watch: poll every 5 min, ring the terminal bell when a cabin appears
-./bluestar_cli.py poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 --interval 300
+bluestar poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 --interval 300
 
 # Background watcher to a log file
-./bluestar_cli.py poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 \
-    --interval 300 > ~/bluestar.log 2>&1 &
+bluestar poll --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28 \
+    --interval 300 2> ~/bluestar.log &
 ```
+
+`bluestar` is `bin/bluestar`, put on `$PATH` by claudine's `link_clis.py`.
+`check --json` prints the bookable offers as JSON.
 
 Flags: `--from`, `--to` (port names), `--depart`, `--return` (YYYY-MM-DD; omit
 `--return` for one-way), `--adults` (default 1), `--headful` (show the browser
@@ -96,15 +102,15 @@ inbound HTTP service, sized at 1 GB so Chromium has headroom while minting.
 
 ## Files
 
+- `bin/bluestar` — symlink to `bluestar_cli.py`, the command on `$PATH`.
 - `bluestar_cli.py` — single entrypoint: CLI (`check` / `poll`), HTTP polling,
   parsing, caching, ntfy notify, and the Playwright token minter. All deps in the
   PEP 723 header.
 - `Dockerfile`, `fly.toml`, `.dockerignore` — always-on deployment.
-- `test_bluestar_cli.py` — unit tests.
+- `tests/test_bluestar_cli.py` — offline unit tests.
 
 ## Tests
 
 ```bash
-uv run --with pytest --with responses --with requests --with click --with playwright \
-    pytest test_bluestar_cli.py -q
+uv run --script tests/test_bluestar_cli.py
 ```

@@ -6,7 +6,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 # Install runtime deps and the Chromium browser (+ its OS libraries).
-RUN pip install requests click playwright \
+# Same exact pins as the PEP 723 header of bluestar_cli.py.
+RUN pip install requests==2.34.2 click==8.4.1 playwright==1.60.0 \
     && playwright install --with-deps chromium
 
 WORKDIR /app

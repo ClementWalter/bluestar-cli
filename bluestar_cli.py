@@ -1,7 +1,14 @@
-#!/usr/bin/env -S uv run
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["requests", "click", "playwright"]
+# dependencies = [
+#     "requests==2.34.2",
+#     "click==8.4.1",
+#     "playwright==1.60.0",
+# ]
+#
+# [tool.uv]
+# exclude-newer = "2026-10-27T00:00:00Z"
 # ///
 """Check / watch Blue Star Ferries cabin availability for any route and dates.
 
@@ -23,9 +30,9 @@ First-time setup (installs the headless browser):
     uv run --with playwright playwright install chromium
 
 Examples:
-    ./bluestar_cli.py check --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
-    ./bluestar_cli.py poll  --from Piraeus --to Naxos  --depart 2026-07-12 --interval 300
-    ./bluestar_cli.py check --from Piraeus --to Patmos --depart 2026-08-08 --adults 2 --headful
+    bluestar check --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
+    bluestar poll  --from Piraeus --to Naxos  --depart 2026-07-12 --interval 300
+    bluestar check --from Piraeus --to Patmos --depart 2026-08-08 --adults 2 --headful
 """
 
 import base64
@@ -43,6 +50,7 @@ import click
 import requests
 
 logging.basicConfig(
+    stream=sys.stderr,
     level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
 )
 logger = logging.getLogger("bluestar")
@@ -454,26 +462,49 @@ def _trip_options(func):
     return func
 
 
-@click.group()
+@click.group(epilog="""\b
+Examples:
+  bluestar check --from Piraeus --to Patmos --depart 2026-08-08
+  bluestar poll --from Piraeus --to Patmos --depart 2026-08-08 --interval 300
+""")
 def cli():
     """Check / watch Blue Star Ferries cabin availability for any route."""
 
 
-@cli.command()
+class FetchError(click.ClickException):
+    """Availability could not be fetched; exit code 2 so watchers can tell it from usage errors."""
+
+    exit_code = 2
+
+
+@cli.command(epilog="""\b
+Examples:
+  bluestar check --from Piraeus --to Patmos --depart 2026-08-08 --return 2026-08-28
+  bluestar check --from Piraeus --to Naxos --depart 2026-07-12 --adults 2 --json
+  bluestar check --from Piraeus --to Patmos --depart 2026-08-08 --headful
+""")
 @_trip_options
-def check(frm, to, depart, ret, adults, headful):
+@click.option("--json", "as_json", is_flag=True, help="Emit the bookable cabin offers as JSON.")
+def check(frm, to, depart, ret, adults, headful, as_json):
     """One-shot: print current cabin availability for the given trip."""
     try:
         data = fetch_with_refresh(frm, to, depart, ret, adults, headless=not headful)
     except Exception as exc:
-        logger.error("Could not check availability: %s", exc)
-        sys.exit(2)
+        raise FetchError(f"could not check availability: {exc}; re-run with --headful to watch the minting") from exc
     avail = available_offers(data)
-    logger.info("Cabin availability:%s", render(data))
-    logger.info("\U0001f389 %d bookable cabin offer(s)!" % len(avail) if avail else "No cabins available yet.")
+    if as_json:
+        click.echo(json.dumps({"available": avail, "status": status_line(data)}, ensure_ascii=False, indent=1))
+        return
+    click.echo(render(data).lstrip("\n"))
+    click.echo(f"{len(avail)} bookable cabin offer(s)" if avail else "No cabins available yet.")
 
 
-@cli.command()
+@cli.command(epilog="""\b
+Examples:
+  bluestar poll --from Piraeus --to Patmos --depart 2026-08-08 --interval 300
+  bluestar poll --from Piraeus --to Naxos --depart 2026-07-12 --max-polls 3
+  bluestar poll --from Piraeus --to Patmos --depart 2026-08-08 --notify-ntfy my-topic
+""")
 @_trip_options
 @click.option("--interval", default=120, envvar="BSF_INTERVAL", help="Seconds between polls.")
 @click.option("--max-polls", default=0, help="Stop after N polls (0 = forever).")

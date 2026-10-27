@@ -1,7 +1,16 @@
-#!/usr/bin/env -S uv run
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest", "requests", "click", "responses", "playwright"]
+# dependencies = [
+#     "pytest==9.1.1",
+#     "requests==2.34.2",
+#     "click==8.4.1",
+#     "responses==0.26.3",
+#     "playwright==1.60.0",
+# ]
+#
+# [tool.uv]
+# exclude-newer = "2026-10-27T00:00:00Z"
 # ///
 """Unit tests for cabin parsing, the token-expiry guard, and token plumbing.
 
@@ -13,19 +22,22 @@ the browser is never launched (only the pure token-decode helper is tested).
 import importlib.util
 from pathlib import Path
 
+import json
+
 import pytest
 import responses
+from click.testing import CliRunner
 
 
 def _load(name):
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent.parent / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
 bsc = _load("bluestar_cli")
-mint = bsc  # mint helpers now live in the same consolidated module
+mint = bsc  # mint helpers live in the same module
 
 TIMETABLES = [("GR:PIR", "GR:PMS", "2026-08-08")]
 
@@ -242,3 +254,42 @@ def test_decode_timetables_recovers_round_trip_legs():
         ("GR:PIR", "GR:PMS", "2026-08-08"),
         ("GR:PMS", "GR:PIR", "2026-08-28"),
     ]
+
+
+CHECK_ARGS = ["check", "--from", "Piraeus", "--to", "Patmos", "--depart", "2026-08-28"]
+
+
+@pytest.fixture
+def stub_fetch(monkeypatch, available_leg):
+    """Replace the minting + HTTP fetch with a canned availability answer."""
+    monkeypatch.setattr(bsc, "fetch_with_refresh", lambda *a, **k: {"data": [available_leg]})
+
+
+@pytest.fixture
+def failing_fetch(monkeypatch):
+    def boom(*a, **k):
+        raise bsc.TokenExpired("no sailings returned")
+
+    monkeypatch.setattr(bsc, "fetch_with_refresh", boom)
+
+
+def test_check_json_lists_the_bookable_offer(stub_fetch):
+    out = CliRunner().invoke(bsc.cli, [*CHECK_ARGS, "--json"]).stdout
+    assert json.loads(out)["available"][0]["count"] == 5
+
+
+def test_check_text_reports_bookable_count(stub_fetch):
+    out = CliRunner().invoke(bsc.cli, CHECK_ARGS).stdout
+    assert out.splitlines()[-1] == "1 bookable cabin offer(s)"
+
+
+def test_check_fetch_failure_exits_2(failing_fetch):
+    assert CliRunner().invoke(bsc.cli, CHECK_ARGS).exit_code == 2
+
+
+def test_check_fetch_failure_names_the_fix(failing_fetch):
+    assert "--headful" in CliRunner().invoke(bsc.cli, CHECK_ARGS).output
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))

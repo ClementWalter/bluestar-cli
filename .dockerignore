@@ -2,7 +2,10 @@
 __pycache__
 *.pyc
 mint_failure.png
-test_bluestar_cli.py
+tests/
+bin/
+.github/
+.pre-commit-config.yaml
 README.md
 SKILL.md
 fly.toml
