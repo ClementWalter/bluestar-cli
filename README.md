@@ -2,6 +2,8 @@
 
 **Visibility: public.**
 
+**Extension: not shipped** as a Claude Desktop extension: it polls a booking site with a headless browser that must be installed from a terminal.
+
 Blue Star Ferries cabin watcher.
 Checks and watches **cabin availability** on any Blue Star Ferries route/date, and
 alerts the moment a cabin frees up (e.g. someone cancels) on a sold-out sailing.
